@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Shorts Builder — Vercel (proxy)</title>
+<style>
+  body{font-family:Inter, Arial, sans-serif;background:#f5f7fb;padding:16px}
+  .box{background:#fff;border-radius:10px;padding:14px;margin-bottom:12px;box-shadow:0 6px 18px rgba(12,18,34,0.06)}
+  input,select,textarea,button{width:100%;padding:10px;border-radius:8px;border:1px solid #e6eef8;margin-top:8px}
+  button{background:#0b69ff;color:#fff;border:none;cursor:pointer}
+  #log{white-space:pre-line;background:#091018;color:#9ff7a0;padding:12px;border-radius:8px;min-height:160px;overflow:auto}
+  audio,video{width:100%;margin-top:8px}
+  .small{font-size:0.88rem;color:#65737e}
+</style>
+</head>
+<body>
+  <h2>Shorts Builder — Vercel-ready (No client keys)</h2>
+
+  <div class="box">
+    <h3>1) Idea / Topic</h3>
+    <input id="idea" placeholder="Type idea (e.g., Discipline)" />
+  </div>
+
+  <div class="box">
+    <h3>2) Options</h3>
+    <label class="small">This deployment uses serverless proxy endpoints under <code>/api/*</code>.</label>
+    <div style="margin-top:8px">
+      <button onclick="runAutomation()">🚀 Generate & Render (Preview)</button>
+      <label style="margin-left:12px"><input id="autoPreview" type="checkbox" checked /> Auto-show preview</label>
+    </div>
+  </div>
+
+  <h3>Logs</h3>
+  <div id="log">Ready — enter idea and click Generate & Render.</div>
+
+  <div class="box">
+    <h3>Playback / Preview</h3>
+    <audio id="player" controls></audio>
+    <video id="previewVideo" controls style="display:none"></video>
+    <div id="videoLink" class="small"></div>
+  </div>
+
+<script>
+function log(msg){ const el=document.getElementById('log'); const t=new Date().toLocaleTimeString(); el.innerText += `\n[${t}] ${msg}`; el.scrollTop = el.scrollHeight; }
+async function runAutomation(){
+  document.getElementById('log').innerText = 'Running...';
+  const idea = document.getElementById('idea').value.trim();
+  if(!idea) return log('❌ Idea missing');
+  log('➡ Generating script (server-side OpenRouter)...');
+  // call serverless OpenRouter proxy
+  try{
+    const prompt = `Write 3 ultra-short motivational lines for a YouTube Short about "${idea}". Requirements:\n1) Line1: English (4-8 words)\n2) Line2: Hindi (4-8 words)\n3) Line3: Hinglish (4-8 words)\nReturn three lines separated by newlines only.`;
+    const r = await fetch('/api/or', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ model:'qwen/qwen-2.5-7b-instruct', messages:[{role:'user', content:prompt}], max_tokens:200 })});
+    const txt = await r.text(); log('OpenRouter proxy status: ' + r.status);
+    let scriptText = '';
+    try{ scriptText = JSON.parse(txt)?.choices?.[0]?.message?.content?.trim() || txt.trim(); }catch(e){ scriptText = txt.trim();}
+    if(!scriptText){
+      scriptText = `${idea} changes everything\nअब ${idea} पर फोकस करो\n${idea} se life badalti hai`;
+      log('ℹ Using fallback script.');
+    }
+    log('📜 Script:\n' + scriptText);
+
+    // simple keyword
+    const low = idea.toLowerCase();
+    const keyword = low.includes('discip') ? 'discipline' : (low.includes('success')?'success': (low.includes('focus')?'focus': (low.split(' ')[0]||'motivation')));
+    log('🔑 Keyword: ' + keyword);
+
+    // fetch Pexels clips via client (Pexels requires client key if used; in this repo we keep clips simple)
+    log('➡ Searching Pexels (public demo links used)...');
+    const clips = [
+      'https://videos.pexels.com/videos/4440998/4440998-960x540.mp4',
+      'https://videos.pexels.com/videos/14756188/14756188-360p.mp4',
+      'https://videos.pexels.com/videos/14756203/14756203-360p.mp4'
+    ];
+    log('🎬 Clips: ' + clips.join(', '));
+
+    // TTS via server FishAudio proxy -> /api/fish-tts (returns binary audio)
+    log('➡ Requesting TTS from server (FishAudio)...');
+    const ttsResp = await fetch('/api/fish-tts', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ voice:'alloy', input: scriptText, format:'mp3' }) });
+    log('FishAudio proxy status: ' + ttsResp.status);
+    if(!ttsResp.ok){ const ttxt = await ttsResp.text(); log('⚠ FishAudio proxy error: '+ttxt); log('ℹ Falling back to browser TTS playback'); await speakWithBrowser(scriptText); }
+    else {
+      const ab = await ttsResp.arrayBuffer(); const blob = new Blob([ab], { type:'audio/mpeg' }); const url = URL.createObjectURL(blob);
+      document.getElementById('player').src = url; log('🔊 TTS audio loaded.');
+      // submit render to JSON2Video via server
+      const background_audio = 'data:audio/mpeg;base64,' + await blobToBase64(blob);
+      log('➡ Submitting render job to server JSON2Video proxy...');
+      const payload = { resolution:'instagram-story', videos: clips.map(u=>({URL:u,seek:0,duration:3})), background_audio };
+      const submit = await fetch('/api/j2-concat', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+      const submitTxt = await submit.text(); log('JSON2Video submit status: ' + submit.status); log('Submit body: ' + submitTxt);
+      if(!submit.ok){ log('⚠ JSON2Video submit failed'); return; }
+      const submitJson = JSON.parse(submitTxt);
+      if(submitJson.movie_url){ showPreview(submitJson.movie_url); return; }
+      const jobId = submitJson.job_id || submitJson.id || submitJson.project;
+      if(!jobId){ log('⚠ No job id returned. Response: ' + JSON.stringify(submitJson)); return; }
+      log('🆔 Job id: ' + jobId);
+      // poll via server j2-job
+      for(let i=0;i<60;i++){
+        await new Promise(r=>setTimeout(r,5000));
+        log('⏱ Polling job (attempt ' + (i+1) + ')...');
+        const p = await fetch('/api/j2-job?id=' + encodeURIComponent(jobId));
+        const pt = await p.text(); log('Poll status: ' + p.status);
+        if(!p.ok){ log('⚠ Poll failed: ' + pt); continue; }
+        try{ const st = JSON.parse(pt); if(st.movie_url){ showPreview(st.movie_url); return; } }catch(e){ log('Poll JSON parse
